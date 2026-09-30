@@ -247,9 +247,17 @@ svg.icon{width:14px;height:14px;flex:0 0 auto;stroke:currentColor;stroke-width:2
 .phase-head .cnt{font-weight:500;opacity:.85;font-size:11px;}
 
 .row{
+  position:relative;
   display:grid; grid-template-columns:38px 1fr 130px 260px; gap:10px; align-items:center;
   padding:4px 16px; border-top:1px solid var(--surface-2); font-size:13px; min-height:34px;
 }
+.row-del{
+  position:absolute; top:50%; right:8px; transform:translateY(-50%);
+  width:22px;height:22px;border-radius:50%;border:none;background:var(--surface);color:var(--sub-2);
+  cursor:pointer; opacity:0; transition:opacity .15s; display:flex;align-items:center;justify-content:center;
+}
+.row:hover .row-del{opacity:1;}
+.row-del:hover{background:var(--surface-3);color:var(--danger);}
 .row:first-child{border-top:none;}
 .row:hover{background:var(--surface-2);}
 .row.done .taskname{color:var(--sub-2); text-decoration:line-through; text-decoration-color:var(--border);}
@@ -636,10 +644,17 @@ function extraList(project){
   if(!project || !project.extraTasks) return [];
   return Object.entries(project.extraTasks).filter(([id,e]) => e && !e.deleted).map(([id,e]) => Object.assign({id}, e));
 }
-function projectTaskCount(project){ return TOTAL_TASKS + extraList(project).length; }
+function isTaskHidden(project, taskId){
+  return !!(project && project.hiddenTasks && project.hiddenTasks[taskId]);
+}
+function hiddenTaskCount(project){
+  if(!project || !project.hiddenTasks) return 0;
+  return Object.keys(project.hiddenTasks).filter(id => project.hiddenTasks[id]).length;
+}
+function projectTaskCount(project){ return TOTAL_TASKS - hiddenTaskCount(project) + extraList(project).length; }
 function projectDoneCount(project){
   let done = 0;
-  TASKS.forEach(t => { if(taskState(project, t.id).status === "done") done++; });
+  TASKS.forEach(t => { if(!isTaskHidden(project, t.id) && taskState(project, t.id).status === "done") done++; });
   extraList(project).forEach(e => { if(e.status === "done") done++; });
   return done;
 }
@@ -929,8 +944,12 @@ function renderTaskRow(project, taskId, task){
     <div class="taskname">${esc(task.text)}</div>
     <div><button class="pill ${st.status}" data-pill>${statusIcon(st.status)}${statusLabel(st.status)}</button></div>
     <div><input class="notes" data-notes value="${esc(st.notes||"")}" placeholder="${esc(task.hint||'')}"></div>
+    <button class="row-del" data-del title="Supprimer cette tâche de ce projet">${icon("x")}</button>
   `;
   row.querySelector("[data-pill]").addEventListener("click", () => cycleStatus(project.id, taskId, st.status));
+  row.querySelector("[data-del]").addEventListener("click", () => {
+    if(confirm("Supprimer cette tâche de ce projet ? (elle reste disponible pour les autres projets)")) hideTask(project.id, taskId);
+  });
   const notesInput = row.querySelector("[data-notes]");
   let debounce;
   notesInput.addEventListener("input", () => {
@@ -980,6 +999,7 @@ function renderBoard(){
 
     let visibleCount = 0;
     ph.taskIds.forEach((taskId) => {
+      if(isTaskHidden(project, taskId)) return;
       const st = taskState(project, taskId);
       if(st.status === "done") doneTotal++;
       if(hideDone && st.status === "done") return;
@@ -990,26 +1010,14 @@ function renderBoard(){
       if(!(hideDone && e.status === "done")) visibleCount++;
     });
 
+    const hiddenInPhase = ph.taskIds.filter(id => isTaskHidden(project, id)).length;
     const phaseWrap = el("div", "phase" + (visibleCount===0 && hideDone ? " collapsed" : ""));
     const head = el("div", "phase-head");
     head.style.background = ph.color;
-    const cntTotal = ph.taskIds.length + phaseExtras.length;
+    const cntTotal = (ph.taskIds.length - hiddenInPhase) + phaseExtras.length;
     head.innerHTML = `${icon("chevron")} ${esc(ph.title)} <span class="cnt">(${cntTotal} tâche${cntTotal>1?"s":""})</span>`;
     head.addEventListener("click", () => phaseWrap.classList.toggle("collapsed"));
     phaseWrap.appendChild(head);
-
-    const rows = el("div", "rows");
-    ph.taskIds.forEach((taskId) => {
-      const task = TASKS.find(t => t.id === taskId);
-      const st = taskState(project, taskId);
-      if(hideDone && st.status === "done") return;
-      rows.appendChild(renderTaskRow(project, taskId, task));
-    });
-    phaseExtras.forEach(e => {
-      if(hideDone && e.status === "done") return;
-      rows.appendChild(renderExtraRow(project, e));
-    });
-    phaseWrap.appendChild(rows);
 
     const addWrap = el("div", "addtask-row");
     if(addingTaskPhaseId === ph.id){
@@ -1030,6 +1038,20 @@ function renderBoard(){
       addWrap.appendChild(btn);
       phaseWrap.appendChild(addWrap);
     }
+
+    const rows = el("div", "rows");
+    ph.taskIds.forEach((taskId) => {
+      if(isTaskHidden(project, taskId)) return;
+      const task = TASKS.find(t => t.id === taskId);
+      const st = taskState(project, taskId);
+      if(hideDone && st.status === "done") return;
+      rows.appendChild(renderTaskRow(project, taskId, task));
+    });
+    phaseExtras.forEach(e => {
+      if(hideDone && e.status === "done") return;
+      rows.appendChild(renderExtraRow(project, e));
+    });
+    phaseWrap.appendChild(rows);
 
     body.appendChild(phaseWrap);
   });
@@ -1252,6 +1274,17 @@ async function deleteExtraTask(projectId, extraId){
     return;
   }
   try{ await db.doc("projects/"+projectId).update({ ["extraTasks."+extraId+".deleted"]: true }); }
+  catch(e){ console.error(e); }
+}
+
+async function hideTask(projectId, taskId){
+  if(dbUnavailable){
+    const p = projects.find(p=>p.id===projectId);
+    if(p){ p.hiddenTasks = p.hiddenTasks || {}; p.hiddenTasks[taskId] = true; }
+    renderAll();
+    return;
+  }
+  try{ await db.doc("projects/"+projectId).update({ ["hiddenTasks."+taskId]: true }); }
   catch(e){ console.error(e); }
 }
 
